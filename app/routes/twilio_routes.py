@@ -138,3 +138,53 @@ def voice_memo_webhook():
         # Clean up temporary file
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
+@twilio_bp.route('/voice/fallback', methods=['POST'])
+def voice_fallback():
+    """Fallback handler for voice calls when primary handler fails"""
+    response = VoiceResponse()
+    
+    # Initial message explaining the situation
+    response.say("We apologize, but our system is temporarily unavailable. We'd like to collect your information for a callback when our system is back online.")
+    
+    # Gather the caller's information
+    gather = response.gather(
+        input='speech dtmf',
+        num_digits=10,
+        action='/twilio/voice/fallback/process',
+        method='POST',
+        timeout=5,
+        speech_timeout='auto'
+    )
+    gather.say("Please say your name and phone number after the tone, or press any key to skip.")
+    
+    # If they don't provide input, give them another option
+    response.say("We didn't receive your information. Please call our main office for immediate assistance. Thank you for your patience.")
+    
+    return Response(str(response), mimetype='text/xml')
+
+@twilio_bp.route('/voice/fallback/process', methods=['POST'])
+def process_voice_fallback():
+    """Process the caller's information from the fallback handler"""
+    response = VoiceResponse()
+    
+    # Get the caller's input
+    caller_input = request.form.get('SpeechResult', '')
+    caller_number = request.form.get('From', 'unknown')
+    
+    # Log the information for follow-up
+    logger.info(f"Fallback callback request - From: {caller_number}, Info: {caller_input}")
+    
+    # Thank the caller
+    response.say("Thank you for your information. A representative will call you back as soon as our system is back online. We appreciate your patience.")
+    
+    return Response(str(response), mimetype='text/xml')
+
+@twilio_bp.route('/sms/fallback', methods=['POST'])
+def sms_fallback():
+    """Fallback handler for SMS when primary handler fails"""
+    response = MessagingResponse()
+    
+    # Add a message explaining the situation and requesting information
+    response.message("We apologize, but our system is temporarily unavailable. Please reply with your name and a brief message, and a representative will contact you when our system is back online.")
+    
+    return Response(str(response), mimetype='text/xml')
