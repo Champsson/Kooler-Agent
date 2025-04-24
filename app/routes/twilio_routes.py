@@ -70,7 +70,10 @@ def voice_webhook():
     response = VoiceResponse()
     
     # Initial greeting with minimal latency
-    response.say("Thank you for calling Kooler Garage Doors. How can I help you today?", voice='alice')
+    # Use pre-generated OpenAI greeting stored in S3
+greeting_url = "https://kooler-agent-tts.s3.amazonaws.com/greeting.mp3"
+response.play(greeting_url) 
+
     
     # Gather speech input
     gather = response.gather(
@@ -115,11 +118,15 @@ def voice_continue():
     
     # Check if response is ready
     if call_sid in RESPONSE_CACHE:
-        s3_urls = RESPONSE_CACHE.pop(call_sid)
-        
-        # Play all audio files
-        for s3_url in s3_urls:
-            response.play(s3_url)
+    s3_urls = RESPONSE_CACHE.pop(call_sid)
+    
+    # Add a short pause for better transition
+    response.pause(length=0.5)
+    
+    # Play all audio files
+    for s3_url in s3_urls:
+        response.play(s3_url)
+
         
         # Add gather for continued conversation
         gather = response.gather(
