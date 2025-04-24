@@ -71,8 +71,8 @@ def voice_webhook():
     
     # Initial greeting with minimal latency
     # Use pre-generated OpenAI greeting stored in S3
-greeting_url = "https://kooler-agent-tts.s3.amazonaws.com/greeting.mp3"
-response.play(greeting_url) 
+    greeting_url = "https://kooler-agent-tts.s3.amazonaws.com/greeting.mp3"
+    response.play(greeting_url) 
 
     
     # Gather speech input
