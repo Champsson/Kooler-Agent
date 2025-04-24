@@ -22,3 +22,11 @@ class Config:
     # Vector Database (Pinecone)
     PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
     PINECONE_ENVIRONMENT = os.getenv('PINECONE_ENVIRONMENT')
+    
+    # AWS Configuration
+    AWS_ACCESS_KEY = os.getenv('AWS_ACCESS_KEY')
+    AWS_SECRET_KEY = os.getenv('AWS_SECRET_KEY')
+    AWS_S3_BUCKET = os.getenv('AWS_S3_BUCKET', 'kooler-agent-tts')
+    AWS_REGION = os.getenv('AWS_REGION', 'us-west-2')
+
+

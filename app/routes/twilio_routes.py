@@ -1,14 +1,68 @@
 import os
+import time
 import tempfile
+import threading
+import re
+import concurrent.futures
 from flask import Blueprint, request, Response, url_for
 from twilio.twiml.voice_response import VoiceResponse
 from twilio.twiml.messaging_response import MessagingResponse
 import openai
 from app.services.conversation_service import process_conversation
-from app.services.tts_service import text_to_speech
-from app.utils import logger
+from app.services.tts_service import get_cached_tts
+from app.utils import timer_decorator, logger
+
+# Caches for in-progress responses
+RESPONSE_CACHE = {}  # Cache for in-progress responses
+CHUNK_CACHE = {}  # Cache for response chunks
 
 twilio_bp = Blueprint('twilio', __name__, url_prefix='/twilio')
+
+def chunk_response(text, max_length=100):
+    """Break response into smaller chunks at sentence boundaries"""
+    if len(text) <= max_length:
+        return [text]
+    
+    # Split by sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) <= max_length:
+            current_chunk += " " + sentence if current_chunk else sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = sentence
+    
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    return chunks
+
+def process_and_respond(speech_result, call_sid):
+    """Process speech input and prepare response in background"""
+    # Process with AI assistant
+    ai_response = process_conversation(speech_result, mode='voice')
+    
+    # Break response into chunks
+    chunks = chunk_response(ai_response)
+    
+    # Process all chunks in parallel
+    s3_urls = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        future_to_chunk = {executor.submit(get_cached_tts, chunk, "nova"): chunk for chunk in chunks}
+        for future in concurrent.futures.as_completed(future_to_chunk):
+            try:
+                s3_url = future.result()
+                if s3_url:
+                    s3_urls.append(s3_url)
+            except Exception as e:
+                logger.error(f"Error processing chunk: {str(e)}")
+    
+    # Store in cache for retrieval
+    RESPONSE_CACHE[call_sid] = s3_urls
 
 @twilio_bp.route('/voice', methods=['POST'])
 def voice_webhook():
@@ -16,7 +70,7 @@ def voice_webhook():
     response = VoiceResponse()
     
     # Initial greeting with minimal latency
-    response.say("Thank you for calling Kooler Garage Doors. I'm processing your request.")
+    response.say("Thank you for calling Kooler Garage Doors. How can I help you today?", voice='alice')
     
     # Gather speech input
     gather = response.gather(
@@ -26,7 +80,6 @@ def voice_webhook():
         speechTimeout='auto',
         speechModel='phone_call'
     )
-    gather.say("How can I help you today?")
     
     return Response(str(response), mimetype='text/xml')
 
@@ -34,43 +87,53 @@ def voice_webhook():
 def process_voice():
     """Process speech input from voice call"""
     speech_result = request.form.get('SpeechResult', '')
+    call_sid = request.form.get('CallSid')
     
-    # Initial acknowledgment with minimal latency
+    if not speech_result:
+        response = VoiceResponse()
+        response.say("I'm sorry, I didn't catch that. Please try again.", voice='alice')
+        return Response(str(response), mimetype='text/xml')
+    
+    # Start background processing
+    threading.Thread(target=process_and_respond, args=(speech_result, call_sid)).start()
+    
+    # Immediate acknowledgment
     response = VoiceResponse()
     response.say("I'm finding that information for you.", voice='alice')
     
-    # Process the conversation with the AI assistant
-    ai_response = process_conversation(speech_result, mode='voice')
+    # Redirect to continue endpoint which will check for the response
+    response.redirect(f'/twilio/voice/continue?call_sid={call_sid}')
     
-    # Convert AI response to speech using OpenAI TTS
-    voice_type = "nova"  # Options: alloy, echo, fable, onyx, nova, shimmer
-    speech_file = text_to_speech(ai_response, voice=voice_type)
+    return Response(str(response), mimetype='text/xml')
+
+@twilio_bp.route('/voice/continue', methods=['GET', 'POST'])
+def voice_continue():
+    """Continue voice response when processing is complete"""
+    call_sid = request.args.get('call_sid') or request.form.get('CallSid')
     
-    if speech_file:
-        # Create a publicly accessible URL for the audio file
-        # In production, you'd use proper file hosting
-        # For development, we'll use a simple approach
-        audio_url = url_for('static', filename=os.path.basename(speech_file), _external=True)
+    response = VoiceResponse()
+    
+    # Check if response is ready
+    if call_sid in RESPONSE_CACHE:
+        s3_urls = RESPONSE_CACHE.pop(call_sid)
         
-        # Move the file to the static directory
-        os.makedirs('app/static', exist_ok=True)
-        os.rename(speech_file, f"app/static/{os.path.basename(speech_file)}")
+        # Play all audio files
+        for s3_url in s3_urls:
+            response.play(s3_url)
         
-        # Play the audio file
-        response.play(audio_url)
+        # Add gather for continued conversation
+        gather = response.gather(
+            input='speech',
+            action='/twilio/voice/process',
+            method='POST',
+            speechTimeout='auto',
+            speechModel='phone_call'
+        )
+        gather.say("Is there anything else I can help you with?", voice='alice')
     else:
-        # Fallback to Twilio TTS if OpenAI TTS fails
-        response.say(ai_response, voice='alice')
-    
-    # Add gather for continued conversation
-    gather = response.gather(
-        input='speech',
-        action='/twilio/voice/process',
-        method='POST',
-        speechTimeout='auto',
-        speechModel='phone_call'
-    )
-    gather.say("Is there anything else I can help you with?", voice='alice')
+        # Response not ready yet, wait a bit and check again
+        response.pause(length=1)
+        response.redirect(f'/twilio/voice/continue?call_sid={call_sid}')
     
     return Response(str(response), mimetype='text/xml')
 
@@ -138,13 +201,14 @@ def voice_memo_webhook():
         # Clean up temporary file
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
+
 @twilio_bp.route('/voice/fallback', methods=['POST'])
 def voice_fallback():
     """Fallback handler for voice calls when primary handler fails"""
     response = VoiceResponse()
     
     # Initial message explaining the situation
-    response.say("We apologize, but our system is temporarily unavailable. We'd like to collect your information for a callback when our system is back online.")
+    response.say("We apologize, but our system is temporarily unavailable. We'd like to collect your information for a callback when our system is back online.", voice='alice')
     
     # Gather the caller's information
     gather = response.gather(
@@ -155,10 +219,10 @@ def voice_fallback():
         timeout=5,
         speech_timeout='auto'
     )
-    gather.say("Please say your name and phone number after the tone, or press any key to skip.")
+    gather.say("Please say your name and phone number after the tone, or press any key to skip.", voice='alice')
     
     # If they don't provide input, give them another option
-    response.say("We didn't receive your information. Please call our main office for immediate assistance. Thank you for your patience.")
+    response.say("We didn't receive your information. Please call our main office for immediate assistance. Thank you for your patience.", voice='alice')
     
     return Response(str(response), mimetype='text/xml')
 
@@ -175,7 +239,7 @@ def process_voice_fallback():
     logger.info(f"Fallback callback request - From: {caller_number}, Info: {caller_input}")
     
     # Thank the caller
-    response.say("Thank you for your information. A representative will call you back as soon as our system is back online. We appreciate your patience.")
+    response.say("Thank you for your information. A representative will call you back as soon as our system is back online. We appreciate your patience.", voice='alice')
     
     return Response(str(response), mimetype='text/xml')
 
