@@ -72,8 +72,7 @@ def voice_webhook():
     # Initial greeting with minimal latency
     # Use pre-generated OpenAI greeting stored in S3
     greeting_url = "https://kooler-agent-tts.s3.amazonaws.com/greeting.mp3"
-    response.play(greeting_url) 
-
+    response.play(greeting_url)  
     
     # Gather speech input
     gather = response.gather(
@@ -118,15 +117,14 @@ def voice_continue():
     
     # Check if response is ready
     if call_sid in RESPONSE_CACHE:
-    s3_urls = RESPONSE_CACHE.pop(call_sid)
-    
-    # Add a short pause for better transition
-    response.pause(length=0.5)
-    
-    # Play all audio files
-    for s3_url in s3_urls:
-        response.play(s3_url)
-
+        s3_urls = RESPONSE_CACHE.pop(call_sid)
+        
+        # Add a short pause for better transition
+        response.pause(length=0.5)
+        
+        # Play all audio files
+        for s3_url in s3_urls:
+            response.play(s3_url)
         
         # Add gather for continued conversation
         gather = response.gather(
@@ -136,7 +134,9 @@ def voice_continue():
             speechTimeout='auto',
             speechModel='phone_call'
         )
-        gather.say("Is there anything else I can help you with?", voice='alice')
+        # Use OpenAI voice for the final prompt too
+        final_prompt_url = "https://kooler-agent-tts.s3.amazonaws.com/final_prompt.mp3"
+        gather.play(final_prompt_url) 
     else:
         # Response not ready yet, wait a bit and check again
         response.pause(length=1)
